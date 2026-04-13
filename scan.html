@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>SellerAmp Barcode Scanner</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0f172a; color: #f1f5f9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100dvh; display: flex; flex-direction: column;
+      align-items: center; padding: 20px 16px 32px; gap: 16px;
+    }
+    .header { width: 100%; max-width: 460px; text-align: center; }
+    .header h1 { font-size: 18px; font-weight: 800; margin-bottom: 5px; letter-spacing: -0.3px; }
+    .header p { font-size: 12px; color: #94a3b8; line-height: 1.5; }
+    .card {
+      background: #1e293b; border: 1px solid #334155; border-radius: 18px;
+      padding: 16px; width: 100%; max-width: 460px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    /* Video / camera */
+    .video-wrap {
+      position: relative; border-radius: 14px; overflow: hidden;
+      background: #0d1117; aspect-ratio: 4/3; width: 100%;
+    }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .scan-line {
+      position: absolute; left: 8%; right: 8%; height: 2px;
+      background: rgba(239,68,68,0.9); box-shadow: 0 0 10px 3px rgba(239,68,68,0.5);
+      animation: sweep 2.2s ease-in-out infinite; pointer-events: none;
+    }
+    @keyframes sweep { 0%,100%{top:12%} 50%{top:82%} }
+    .scan-corner {
+      position: absolute; width: 22px; height: 22px; border-color: #6366f1;
+      border-style: solid; opacity: 0.85;
+    }
+    .scan-corner.tl { top: 8%; left: 8%;  border-width: 3px 0 0 3px; border-radius: 4px 0 0 0; }
+    .scan-corner.tr { top: 8%; right: 8%; border-width: 3px 3px 0 0; border-radius: 0 4px 0 0; }
+    .scan-corner.bl { bottom: 8%; left: 8%;  border-width: 0 0 3px 3px; border-radius: 0 0 0 4px; }
+    .scan-corner.br { bottom: 8%; right: 8%; border-width: 0 3px 3px 0; border-radius: 0 0 4px 0; }
+    /* Status */
+    .status {
+      font-size: 13px; font-weight: 600; text-align: center;
+      color: #94a3b8; min-height: 20px; transition: color 200ms;
+    }
+    .status.ok  { color: #22c55e; }
+    .status.err { color: #f59e0b; }
+    /* Dividers */
+    .divider {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 11px; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #334155; }
+    /* Inputs + buttons */
+    .row { display: flex; gap: 8px; align-items: stretch; }
+    input[type=text] {
+      flex: 1; padding: 11px 13px; border-radius: 10px; font-size: 15px;
+      border: 1px solid #334155; background: #0f172a; color: #f1f5f9;
+      outline: none; font-family: inherit; transition: border-color 150ms;
+      -webkit-appearance: none;
+    }
+    input[type=text]:focus { border-color: #6366f1; }
+    button {
+      padding: 11px 20px; border-radius: 10px; font-size: 13px; font-weight: 700;
+      border: none; cursor: pointer; font-family: inherit; transition: filter 140ms, background 140ms;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.primary { background: #6366f1; color: #fff; }
+    button.primary:active { filter: brightness(0.85); }
+    button.secondary {
+      background: transparent; border: 1px solid #334155; color: #cbd5e1;
+      width: 100%; padding: 12px;
+    }
+    button.secondary:active { background: #1e293b; }
+    /* Success screen */
+    #success-screen { display: none; text-align: center; align-items: center; }
+    .success-icon { font-size: 52px; line-height: 1; }
+    .success-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; margin-top: 6px; }
+    .success-code {
+      font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums;
+      color: #6366f1; letter-spacing: 2px; font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+      word-break: break-all;
+    }
+    .success-msg { font-size: 13px; color: #64748b; line-height: 1.6; }
+    /* No-token warning */
+    #no-token { display: none; text-align: center; gap: 10px; }
+    #no-token .warn-icon { font-size: 40px; }
+    #no-token p { font-size: 13px; color: #94a3b8; line-height: 1.6; }
+    /* File input hidden */
+    #file-input { position: absolute; opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>📦 SellerAmp Barcode Bridge</h1>
+    <p>Scan a product barcode with your phone camera.<br>The result sends to your desktop extension automatically.</p>
+  </div>
+
+  <!-- No-token state -->
+  <div class="card" id="no-token">
+    <div class="warn-icon">⚠️</div>
+    <p>No session token found.<br>Please scan the QR code shown in the SellerAmp extension on your desktop to start a session.</p>
+  </div>
+
+  <!-- Main scan card -->
+  <div class="card" id="scan-card">
+    <div class="video-wrap" id="video-wrap">
+      <video id="video" autoplay muted playsinline></video>
+      <div class="scan-line" id="scan-line"></div>
+      <div class="scan-corner tl"></div>
+      <div class="scan-corner tr"></div>
+      <div class="scan-corner bl"></div>
+      <div class="scan-corner br"></div>
+    </div>
+    <div class="status" id="status">Starting camera…</div>
+
+    <div class="divider">or take a photo</div>
+    <button class="secondary" id="photo-btn">📸 Open Camera / Choose Photo</button>
+    <input type="file" id="file-input" accept="image/*" capture="environment">
+
+    <div class="divider">or type manually</div>
+    <div class="row">
+      <input type="text" id="manual-input" placeholder="Type barcode number…" inputmode="numeric">
+      <button class="primary" id="manual-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- Success card -->
+  <div class="card" id="success-screen">
+    <div class="success-icon">✅</div>
+    <div class="success-label">Barcode sent to SellerAmp</div>
+    <div class="success-code" id="success-code"></div>
+    <div class="success-msg">Your desktop extension received the barcode<br>and has started a product lookup.</div>
+    <button class="secondary" id="scan-again-btn">Scan Another Barcode</button>
+  </div>
+
+  <script>
+    // ── Session token from URL ───────────────────────────────────────────────
+    const params = new URLSearchParams(location.search);
+    const token  = (params.get('t') || '').trim();
+
+    const videoEl      = document.getElementById('video');
+    const statusEl     = document.getElementById('status');
+    const scanLine     = document.getElementById('scan-line');
+    const scanCard     = document.getElementById('scan-card');
+    const noToken      = document.getElementById('no-token');
+    const successCard  = document.getElementById('success-screen');
+    const successCode  = document.getElementById('success-code');
+    const manualInput  = document.getElementById('manual-input');
+    const manualBtn    = document.getElementById('manual-btn');
+    const photoBtn     = document.getElementById('photo-btn');
+    const fileInput    = document.getElementById('file-input');
+    const scanAgainBtn = document.getElementById('scan-again-btn');
+
+    if (!token) {
+      scanCard.style.display = 'none';
+      noToken.style.display  = 'flex';
+    }
+
+    let _submitted = false;
+    let _rafId     = null;
+    let _stream    = null;
+
+    // ── Submit barcode to ntfy.sh then show success ─────────────────────────
+    async function submit(code) {
+      if (_submitted || !token) return;
+      _submitted = true;
+
+      // Stop camera
+      if (_rafId) cancelAnimationFrame(_rafId);
+      if (_stream) { try { _stream.getTracks().forEach(t => t.stop()); } catch(_) {} _stream = null; }
+
+      // Relay via ntfy.sh
+      try {
+        await fetch('https://ntfy.sh/' + token, {
+          method: 'POST',
+          body: code,
+          headers: { 'Title': 'SellerAmp Barcode', 'Priority': 'high', 'Tags': 'barcode' },
+        });
+      } catch(_) { /* offline — show success anyway since we can't help it */ }
+
+      // Show success
+      scanCard.style.display  = 'none';
+      successCode.textContent = code;
+      successCard.style.display = 'flex';
+    }
+
+    // ── Manual entry ─────────────────────────────────────────────────────────
+    manualBtn.addEventListener('click', () => { const v = manualInput.value.trim(); if (v) submit(v); });
+    manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = manualInput.value.trim(); if (v) submit(v); } });
+
+    // ── Scan again ───────────────────────────────────────────────────────────
+    scanAgainBtn.addEventListener('click', () => {
+      _submitted = false;
+      successCard.style.display = 'none';
+      scanCard.style.display    = 'flex';
+      startCamera();
+    });
+
+    // ── File / photo fallback (works on iOS via capture="environment") ───────
+    photoBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      setStatus('Decoding image…', '');
+      try {
+        if ('BarcodeDetector' in window) {
+          const detector = new BarcodeDetector({
+            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','qr_code'],
+          });
+          const bitmap  = await createImageBitmap(file);
+          const results = await detector.detect(bitmap);
+          if (results.length > 0) { submit(results[0].rawValue); return; }
+          setStatus('⚠ No barcode found in photo — try again or type manually.', 'err');
+        } else {
+          // ZXing fallback for iOS Safari (no BarcodeDetector support)
+          await ensureZXing();
+          const reader = new window.ZXing.BrowserMultiFormatReader();
+          const url    = URL.createObjectURL(file);
+          try {
+            const result = await reader.decodeFromImageUrl(url);
+            URL.revokeObjectURL(url);
+            if (result) { submit(result.getText()); return; }
+          } catch(_) {
+            URL.revokeObjectURL(url);
+            setStatus('⚠ No barcode found in photo — try again or type manually.', 'err');
+          }
+        }
+      } catch(e) {
+        setStatus('⚠ Decode error — try again or type manually.', 'err');
+      }
+      // Reset file input so the same file can be picked again
+      fileInput.value = '';
+    });
+
+    function ensureZXing() {
+      return new Promise((resolve, reject) => {
+        if (window.ZXing && window.ZXing.BrowserMultiFormatReader) { resolve(); return; }
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/@zxing/library@0.19.2/umd/index.min.js';
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+
+    // ── Real-time BarcodeDetector camera scan ────────────────────────────────
+    async function startCamera() {
+      _submitted = false;
+      scanLine.style.display = '';
+      setStatus('Starting camera…', '');
+      try {
+        _stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
+        });
+        videoEl.srcObject = _stream;
+
+        if (!('BarcodeDetector' in window)) {
+          // Camera available but no BarcodeDetector (iOS Safari) — live scanning not possible
+          setStatus('📸 Camera ready. Use "Open Camera / Choose Photo" to capture a barcode.', 'ok');
+          scanLine.style.display = 'none';
+          return;
+        }
+
+        const detector = new BarcodeDetector({
+          formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix'],
+        });
+        videoEl.addEventListener('playing', () => { setStatus('Point at barcode…', ''); scan(); }, { once: true });
+
+        function scan() {
+          if (_submitted) return;
+          if (videoEl.readyState < 2) { _rafId = requestAnimationFrame(scan); return; }
+          detector.detect(videoEl).then(codes => {
+            if (_submitted) return;
+            if (codes.length > 0) { submit(codes[0].rawValue); return; }
+            _rafId = requestAnimationFrame(scan);
+          }).catch(() => { if (!_submitted) _rafId = requestAnimationFrame(scan); });
+        }
+
+      } catch(err) {
+        scanLine.style.display = 'none';
+        if (err && err.name === 'NotAllowedError') {
+          setStatus('⚠ Camera permission denied — use "Open Camera / Choose Photo" or type manually.', 'err');
+        } else {
+          setStatus('⚠ Camera unavailable — use "Open Camera / Choose Photo" or type manually.', 'err');
+        }
+      }
+    }
+
+    function setStatus(msg, cls) {
+      statusEl.textContent  = msg;
+      statusEl.className    = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+    if (token) startCamera();
+  </script>
+</body>
+</html>
