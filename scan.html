@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <title>SellerAmp Barcode Scanner</title>
+  <title>Barcode Scanner Bridge</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -95,14 +95,14 @@
 <body>
 
   <div class="header">
-    <h1>📦 SellerAmp Barcode Bridge</h1>
+    <h1>📦 Barcode Bridge</h1>
     <p>Scan a product barcode with your phone camera.<br>The result sends to your desktop extension automatically.</p>
   </div>
 
   <!-- No-token state -->
   <div class="card" id="no-token">
     <div class="warn-icon">⚠️</div>
-    <p>No session token found.<br>Please scan the QR code shown in the SellerAmp extension on your desktop to start a session.</p>
+    <p>No session token found.<br>Please scan the QR code shown in the desktop extension to start a session.</p>
   </div>
 
   <!-- Main scan card -->
@@ -131,7 +131,7 @@
   <!-- Success card -->
   <div class="card" id="success-screen">
     <div class="success-icon">✅</div>
-    <div class="success-label">Barcode sent to SellerAmp</div>
+    <div class="success-label">Barcode sent to desktop</div>
     <div class="success-code" id="success-code"></div>
     <div class="success-msg">Your desktop extension received the barcode<br>and has started a product lookup.</div>
     <button class="secondary" id="scan-again-btn">Scan Another Barcode</button>
@@ -178,7 +178,7 @@
         await fetch('https://ntfy.sh/' + token, {
           method: 'POST',
           body: code,
-          headers: { 'Title': 'SellerAmp Barcode', 'Priority': 'high', 'Tags': 'barcode' },
+          headers: { 'Title': 'Barcode Scan', 'Priority': 'high', 'Tags': 'barcode' },
         });
       } catch(_) { /* offline — show success anyway since we can't help it */ }
 
