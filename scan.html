@@ -207,7 +207,7 @@
     // ── BarcodeDetector live scan (Android Chrome) ───────────────────────────
     async function startNativeScanner() {
       // Filter to formats this browser actually supports to avoid silent failures
-      let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'];
+      let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_93','code_39','itf','codabar','data_matrix','qr_code','pdf417','aztec'];
       try {
         const supported = await BarcodeDetector.getSupportedFormats();
         formats = formats.filter(f => supported.includes(f));
@@ -317,7 +317,7 @@
       // Path 1: BarcodeDetector via ImageBitmap (fast, native)
       if ('BarcodeDetector' in window) {
         try {
-          let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar','qr_code'];
+          let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_93','code_39','itf','codabar','data_matrix','qr_code','pdf417','aztec'];
           try { const sup = await BarcodeDetector.getSupportedFormats(); formats = formats.filter(f => sup.includes(f)); } catch(_) {}
           const detector = new BarcodeDetector({ formats });
           const bitmap   = await createImageBitmap(file);
