@@ -119,7 +119,7 @@
 
     <div class="divider">or take a photo</div>
     <button class="secondary" id="photo-btn">📸 Open Camera / Choose Photo</button>
-    <input type="file" id="file-input" accept="image/*" capture="environment">
+    <input type="file" id="file-input" accept="image/*">
 
     <div class="divider">or type manually</div>
     <div class="row">
@@ -163,6 +163,12 @@
     let _submitted = false;
     let _rafId     = null;
     let _stream    = null;
+    let _scanning  = false; // prevents overlapping detect() calls
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className   = 'status' + (cls ? ' ' + cls : '');
+    }
 
     // ── Submit barcode to ntfy.sh then show success ─────────────────────────
     async function submit(code) {
@@ -170,7 +176,7 @@
       _submitted = true;
 
       // Stop camera
-      if (_rafId) cancelAnimationFrame(_rafId);
+      if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
       if (_stream) { try { _stream.getTracks().forEach(t => t.stop()); } catch(_) {} _stream = null; }
 
       // Relay via ntfy.sh
@@ -180,11 +186,11 @@
           body: code,
           headers: { 'Title': 'Barcode Scan', 'Priority': 'high', 'Tags': 'barcode' },
         });
-      } catch(_) { /* offline — show success anyway since we can't help it */ }
+      } catch(_) {}
 
       // Show success
-      scanCard.style.display  = 'none';
-      successCode.textContent = code;
+      scanCard.style.display    = 'none';
+      successCode.textContent   = code;
       successCard.style.display = 'flex';
     }
 
@@ -200,98 +206,139 @@
       startCamera();
     });
 
-    // ── File / photo fallback (works on iOS via capture="environment") ───────
-    photoBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files && fileInput.files[0];
-      if (!file) return;
-      setStatus('Decoding image…', '');
-      try {
-        if ('BarcodeDetector' in window) {
+    // ── Decode a File/Blob into a barcode string ─────────────────────────────
+    // Tries BarcodeDetector first (Android Chrome), then ZXing via canvas (iOS Safari).
+    async function decodeFile(file) {
+      // ── Path 1: Native BarcodeDetector via ImageBitmap ──────────────────
+      if ('BarcodeDetector' in window) {
+        try {
           const detector = new BarcodeDetector({
-            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','qr_code'],
+            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'],
           });
           const bitmap  = await createImageBitmap(file);
           const results = await detector.detect(bitmap);
-          if (results.length > 0) { submit(results[0].rawValue); return; }
-          setStatus('⚠ No barcode found in photo — try again or type manually.', 'err');
-        } else {
-          // ZXing fallback for iOS Safari (no BarcodeDetector support)
-          await ensureZXing();
-          const reader = new window.ZXing.BrowserMultiFormatReader();
-          const url    = URL.createObjectURL(file);
-          try {
-            const result = await reader.decodeFromImageUrl(url);
-            URL.revokeObjectURL(url);
-            if (result) { submit(result.getText()); return; }
-          } catch(_) {
-            URL.revokeObjectURL(url);
-            setStatus('⚠ No barcode found in photo — try again or type manually.', 'err');
-          }
-        }
-      } catch(e) {
-        setStatus('⚠ Decode error — try again or type manually.', 'err');
+          bitmap.close();
+          if (results.length > 0) return results[0].rawValue;
+        } catch(_) {}
       }
-      // Reset file input so the same file can be picked again
-      fileInput.value = '';
+
+      // ── Path 2: ZXing via canvas (robust across all browsers) ────────────
+      // We draw the image to a canvas first, avoiding blob-URL-in-img-src issues on iOS.
+      await ensureZXing();
+      const img = new Image();
+      const blobUrl = URL.createObjectURL(file);
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = blobUrl; });
+      URL.revokeObjectURL(blobUrl);
+      const canvas = document.createElement('canvas');
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      const reader = new window.ZXing.BrowserMultiFormatReader();
+      const result = await reader.decodeFromCanvas(canvas); // throws if not found
+      return result.getText();
+    }
+
+    // ── File / photo capture ─────────────────────────────────────────────────
+    photoBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = ''; // reset early so same file can be re-selected
+      if (!file) return;
+      setStatus('Decoding image…', '');
+      try {
+        const barcode = await decodeFile(file);
+        submit(barcode);
+      } catch(e) {
+        setStatus('⚠ No barcode found — try a clearer photo or type manually.', 'err');
+      }
     });
 
+    // ── Load ZXing from CDN (lazy, cached) ───────────────────────────────────
+    let _zxingReady = null;
     function ensureZXing() {
-      return new Promise((resolve, reject) => {
+      if (_zxingReady) return _zxingReady;
+      _zxingReady = new Promise((resolve, reject) => {
         if (window.ZXing && window.ZXing.BrowserMultiFormatReader) { resolve(); return; }
         const s = document.createElement('script');
         s.src = 'https://unpkg.com/@zxing/library@0.19.2/umd/index.min.js';
-        s.onload = resolve; s.onerror = reject;
+        s.onload = () => {
+          // The UMD bundle may expose as ZXing or default — normalise
+          if (!window.ZXing && window.zxing) window.ZXing = window.zxing;
+          resolve();
+        };
+        s.onerror = reject;
         document.head.appendChild(s);
       });
+      return _zxingReady;
     }
 
-    // ── Real-time BarcodeDetector camera scan ────────────────────────────────
+    // ── Real-time BarcodeDetector live camera scan ────────────────────────────
     async function startCamera() {
       _submitted = false;
+      _scanning  = false;
       scanLine.style.display = '';
       setStatus('Starting camera…', '');
+
       try {
         _stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
         });
         videoEl.srcObject = _stream;
 
+        // ── Explicitly start playback — required on many mobile browsers ──
+        // Do NOT await this; on iOS the promise may never resolve in some contexts.
+        videoEl.play().catch(() => {});
+
         if (!('BarcodeDetector' in window)) {
-          // Camera available but no BarcodeDetector (iOS Safari) — live scanning not possible
-          setStatus('📸 Camera ready. Use "Open Camera / Choose Photo" to capture a barcode.', 'ok');
+          // iOS Safari <17.4 has no BarcodeDetector — live scan not possible
+          setStatus('📸 Camera ready — use "Open Camera / Choose Photo" to scan a barcode.', 'ok');
           scanLine.style.display = 'none';
           return;
         }
 
         const detector = new BarcodeDetector({
-          formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix'],
+          formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'],
         });
-        videoEl.addEventListener('playing', () => { setStatus('Point at barcode…', ''); scan(); }, { once: true });
 
         function scan() {
           if (_submitted) return;
-          if (videoEl.readyState < 2) { _rafId = requestAnimationFrame(scan); return; }
-          detector.detect(videoEl).then(codes => {
-            if (_submitted) return;
-            if (codes.length > 0) { submit(codes[0].rawValue); return; }
-            _rafId = requestAnimationFrame(scan);
-          }).catch(() => { if (!_submitted) _rafId = requestAnimationFrame(scan); });
+          // Skip frame if video isn't ready or a detect() is already in-flight
+          if (videoEl.readyState < 2 || videoEl.paused || _scanning) {
+            _rafId = requestAnimationFrame(scan); return;
+          }
+          _scanning = true;
+          detector.detect(videoEl)
+            .then(codes => {
+              _scanning = false;
+              if (_submitted) return;
+              if (codes.length > 0) { submit(codes[0].rawValue); return; }
+              _rafId = requestAnimationFrame(scan);
+            })
+            .catch(() => {
+              _scanning = false;
+              if (!_submitted) _rafId = requestAnimationFrame(scan);
+            });
+        }
+
+        // ── Start scanning: handle race where 'playing' may already have fired ──
+        const kickScan = () => { setStatus('Point at barcode…', 'ok'); scan(); };
+        if (!videoEl.paused) {
+          kickScan();
+        } else {
+          videoEl.addEventListener('playing', kickScan, { once: true });
+          // Safety fallback: if 'playing' never fires within 3 s, try anyway
+          setTimeout(() => { if (!_submitted && videoEl.readyState >= 2) kickScan(); }, 3000);
         }
 
       } catch(err) {
         scanLine.style.display = 'none';
-        if (err && err.name === 'NotAllowedError') {
-          setStatus('⚠ Camera permission denied — use "Open Camera / Choose Photo" or type manually.', 'err');
-        } else {
-          setStatus('⚠ Camera unavailable — use "Open Camera / Choose Photo" or type manually.', 'err');
-        }
+        const msg = err && err.name === 'NotAllowedError'
+          ? '⚠ Camera permission denied — use the photo button or type manually.'
+          : err && err.name === 'NotFoundError'
+            ? '⚠ No camera found — use the photo button or type manually.'
+            : '⚠ Camera unavailable (' + (err && err.name || 'unknown') + ') — use the photo button.';
+        setStatus(msg, 'err');
       }
-    }
-
-    function setStatus(msg, cls) {
-      statusEl.textContent  = msg;
-      statusEl.className    = 'status' + (cls ? ' ' + cls : '');
     }
 
     // ── Boot ─────────────────────────────────────────────────────────────────
