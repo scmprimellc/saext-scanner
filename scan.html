@@ -117,6 +117,8 @@
     </div>
     <div class="status" id="status">Starting camera…</div>
 
+    <button class="secondary" id="torch-btn" style="display:none">🔦 Flash</button>
+
     <div class="divider">or take a photo</div>
     <button class="secondary" id="photo-btn">📸 Open Camera / Choose Photo</button>
     <input type="file" id="file-input" accept="image/*">
@@ -138,7 +140,6 @@
   </div>
 
   <script>
-    // ── Session token from URL ───────────────────────────────────────────────
     const params = new URLSearchParams(location.search);
     const token  = (params.get('t') || '').trim();
 
@@ -154,195 +155,227 @@
     const photoBtn     = document.getElementById('photo-btn');
     const fileInput    = document.getElementById('file-input');
     const scanAgainBtn = document.getElementById('scan-again-btn');
+    const torchBtn     = document.getElementById('torch-btn');
 
-    if (!token) {
-      scanCard.style.display = 'none';
-      noToken.style.display  = 'flex';
-    }
-
-    let _submitted = false;
-    let _rafId     = null;
-    let _stream    = null;
-    let _scanning  = false; // prevents overlapping detect() calls
+    let _stream     = null;
+    let _submitted  = false;
+    let _rafId      = null;
+    let _torchOn    = false;
+    let _torchTrack = null;
 
     function setStatus(msg, cls) {
       statusEl.textContent = msg;
       statusEl.className   = 'status' + (cls ? ' ' + cls : '');
     }
 
-    // ── Submit barcode to ntfy.sh then show success ─────────────────────────
+    function stopCamera() {
+      if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+      if (_stream) { try { _stream.getTracks().forEach(t => t.stop()); } catch(_) {} _stream = null; }
+      _torchTrack = null;
+    }
+
     async function submit(code) {
       if (_submitted || !token) return;
       _submitted = true;
-
-      // Stop camera
-      if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
-      if (_stream) { try { _stream.getTracks().forEach(t => t.stop()); } catch(_) {} _stream = null; }
-
-      // Relay via ntfy.sh
+      stopCamera();
       try {
         await fetch('https://ntfy.sh/' + token, {
-          method: 'POST',
-          body: code,
+          method: 'POST', body: code,
           headers: { 'Title': 'Barcode Scan', 'Priority': 'high', 'Tags': 'barcode' },
         });
       } catch(_) {}
-
-      // Show success
       scanCard.style.display    = 'none';
       successCode.textContent   = code;
       successCard.style.display = 'flex';
     }
 
-    // ── Manual entry ─────────────────────────────────────────────────────────
-    manualBtn.addEventListener('click', () => { const v = manualInput.value.trim(); if (v) submit(v); });
-    manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = manualInput.value.trim(); if (v) submit(v); } });
-
-    // ── Scan again ───────────────────────────────────────────────────────────
-    scanAgainBtn.addEventListener('click', () => {
-      _submitted = false;
-      successCard.style.display = 'none';
-      scanCard.style.display    = 'flex';
-      startCamera();
-    });
-
-    // ── Decode a File/Blob into a barcode string ─────────────────────────────
-    // Tries BarcodeDetector first (Android Chrome), then ZXing via canvas (iOS Safari).
-    async function decodeFile(file) {
-      // ── Path 1: Native BarcodeDetector via ImageBitmap ──────────────────
-      if ('BarcodeDetector' in window) {
-        try {
-          const detector = new BarcodeDetector({
-            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'],
-          });
-          const bitmap  = await createImageBitmap(file);
-          const results = await detector.detect(bitmap);
-          bitmap.close();
-          if (results.length > 0) return results[0].rawValue;
-        } catch(_) {}
-      }
-
-      // ── Path 2: ZXing via canvas (robust across all browsers) ────────────
-      // We draw the image to a canvas first, avoiding blob-URL-in-img-src issues on iOS.
-      await ensureZXing();
-      const img = new Image();
-      const blobUrl = URL.createObjectURL(file);
-      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = blobUrl; });
-      URL.revokeObjectURL(blobUrl);
-      const canvas = document.createElement('canvas');
-      canvas.width  = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      const reader = new window.ZXing.BrowserMultiFormatReader();
-      const result = await reader.decodeFromCanvas(canvas); // throws if not found
-      return result.getText();
-    }
-
-    // ── File / photo capture ─────────────────────────────────────────────────
-    photoBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files && fileInput.files[0];
-      fileInput.value = ''; // reset early so same file can be re-selected
-      if (!file) return;
-      setStatus('Decoding image…', '');
-      try {
-        const barcode = await decodeFile(file);
-        submit(barcode);
-      } catch(e) {
-        setStatus('⚠ No barcode found — try a clearer photo or type manually.', 'err');
-      }
-    });
-
-    // ── Load ZXing from CDN (lazy, cached) ───────────────────────────────────
-    let _zxingReady = null;
+    // ── ZXing lazy-load from CDN ─────────────────────────────────────────────
+    let _zxingPromise = null;
     function ensureZXing() {
-      if (_zxingReady) return _zxingReady;
-      _zxingReady = new Promise((resolve, reject) => {
+      if (_zxingPromise) return _zxingPromise;
+      _zxingPromise = new Promise((resolve, reject) => {
         if (window.ZXing && window.ZXing.BrowserMultiFormatReader) { resolve(); return; }
         const s = document.createElement('script');
         s.src = 'https://unpkg.com/@zxing/library@0.19.2/umd/index.min.js';
-        s.onload = () => {
-          // The UMD bundle may expose as ZXing or default — normalise
-          if (!window.ZXing && window.zxing) window.ZXing = window.zxing;
-          resolve();
-        };
+        s.onload = () => resolve();
         s.onerror = reject;
         document.head.appendChild(s);
       });
-      return _zxingReady;
+      return _zxingPromise;
     }
 
-    // ── Real-time BarcodeDetector live camera scan ────────────────────────────
+    // ── BarcodeDetector live scan (Android Chrome) ───────────────────────────
+    async function startNativeScanner() {
+      // Filter to formats this browser actually supports to avoid silent failures
+      let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'];
+      try {
+        const supported = await BarcodeDetector.getSupportedFormats();
+        formats = formats.filter(f => supported.includes(f));
+      } catch(_) {}
+      if (!formats.length) {
+        // BarcodeDetector exists but supports nothing — fall through to ZXing
+        setStatus('Loading scanner…');
+        await ensureZXing(); startZXingScanner(); return;
+      }
+      const detector = new BarcodeDetector({ formats });
+      setStatus('Point at barcode…', 'ok');
+      let _busy = false, _tick = 0;
+      function scan() {
+        if (_submitted) return;
+        _tick++;
+        _rafId = requestAnimationFrame(scan);
+        // Throttle to ~15 fps (every 4th frame on 60 Hz screen)
+        if (_tick % 4 !== 0 || _busy || videoEl.readyState < 2 || videoEl.paused) return;
+        _busy = true;
+        detector.detect(videoEl)
+          .then(codes => {
+            _busy = false;
+            if (!_submitted && codes.length > 0) submit(codes[0].rawValue);
+          })
+          .catch(() => { _busy = false; });
+      }
+      _rafId = requestAnimationFrame(scan);
+    }
+
+    // ── ZXing live scan (iOS Safari, Firefox, older Android) ─────────────────
+    function startZXingScanner() {
+      setStatus('Point at barcode…', 'ok');
+      const reader = new window.ZXing.BrowserMultiFormatReader();
+      function tryDecode() {
+        if (_submitted) return;
+        if (videoEl.readyState < 2 || videoEl.paused) { setTimeout(tryDecode, 250); return; }
+        reader.decodeOnce(videoEl)
+          .then(result => { if (!_submitted && result) submit(result.getText()); })
+          .catch(() => { if (!_submitted) setTimeout(tryDecode, 150); });
+      }
+      tryDecode();
+    }
+
+    // ── Start camera + pick scanner ──────────────────────────────────────────
     async function startCamera() {
       _submitted = false;
-      _scanning  = false;
+      stopCamera();
+      torchBtn.style.display = 'none';
       scanLine.style.display = '';
-      setStatus('Starting camera…', '');
-
+      setStatus('Starting camera…');
       try {
         _stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
         });
         videoEl.srcObject = _stream;
 
-        // ── Explicitly start playback — required on many mobile browsers ──
-        // Do NOT await this; on iOS the promise may never resolve in some contexts.
+        // Torch: check before play() on some Android devices
+        _torchTrack = _stream.getVideoTracks()[0];
+        try {
+          const caps = _torchTrack.getCapabilities ? _torchTrack.getCapabilities() : {};
+          if (caps.torch) torchBtn.style.display = '';
+        } catch(_) {}
+
+        // Explicit play() — autoplay attribute alone is unreliable on mobile
         videoEl.play().catch(() => {});
 
-        if (!('BarcodeDetector' in window)) {
-          // iOS Safari <17.4 has no BarcodeDetector — live scan not possible
-          setStatus('📸 Camera ready — use "Open Camera / Choose Photo" to scan a barcode.', 'ok');
-          scanLine.style.display = 'none';
-          return;
-        }
-
-        const detector = new BarcodeDetector({
-          formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar'],
+        // Wait until the video is producing frames before trying to decode
+        await new Promise(resolve => {
+          if (videoEl.readyState >= 2) { resolve(); return; }
+          videoEl.addEventListener('canplay', resolve, { once: true });
+          setTimeout(resolve, 5000); // safety net
         });
 
-        function scan() {
-          if (_submitted) return;
-          // Skip frame if video isn't ready or a detect() is already in-flight
-          if (videoEl.readyState < 2 || videoEl.paused || _scanning) {
-            _rafId = requestAnimationFrame(scan); return;
-          }
-          _scanning = true;
-          detector.detect(videoEl)
-            .then(codes => {
-              _scanning = false;
-              if (_submitted) return;
-              if (codes.length > 0) { submit(codes[0].rawValue); return; }
-              _rafId = requestAnimationFrame(scan);
-            })
-            .catch(() => {
-              _scanning = false;
-              if (!_submitted) _rafId = requestAnimationFrame(scan);
-            });
-        }
-
-        // ── Start scanning: handle race where 'playing' may already have fired ──
-        const kickScan = () => { setStatus('Point at barcode…', 'ok'); scan(); };
-        if (!videoEl.paused) {
-          kickScan();
+        if ('BarcodeDetector' in window) {
+          startNativeScanner();
         } else {
-          videoEl.addEventListener('playing', kickScan, { once: true });
-          // Safety fallback: if 'playing' never fires within 3 s, try anyway
-          setTimeout(() => { if (!_submitted && videoEl.readyState >= 2) kickScan(); }, 3000);
+          setStatus('Loading scanner…');
+          await ensureZXing();
+          startZXingScanner();
         }
 
       } catch(err) {
         scanLine.style.display = 'none';
-        const msg = err && err.name === 'NotAllowedError'
-          ? '⚠ Camera permission denied — use the photo button or type manually.'
-          : err && err.name === 'NotFoundError'
-            ? '⚠ No camera found — use the photo button or type manually.'
-            : '⚠ Camera unavailable (' + (err && err.name || 'unknown') + ') — use the photo button.';
-        setStatus(msg, 'err');
+        const n = (err && err.name) || '';
+        setStatus(
+          n === 'NotAllowedError' ? '⚠ Camera permission denied — use the photo button below.' :
+          n === 'NotFoundError'   ? '⚠ No camera found — use the photo button below.' :
+          '⚠ Camera error: ' + (n || String(err)), 'err'
+        );
       }
     }
 
+    // ── Torch toggle ─────────────────────────────────────────────────────────
+    torchBtn.addEventListener('click', async () => {
+      if (!_torchTrack) return;
+      _torchOn = !_torchOn;
+      try {
+        await _torchTrack.applyConstraints({ advanced: [{ torch: _torchOn }] });
+        torchBtn.textContent       = _torchOn ? '🔦 Flash: ON' : '🔦 Flash';
+        torchBtn.style.color       = _torchOn ? '#a5b4fc' : '#cbd5e1';
+        torchBtn.style.borderColor = _torchOn ? '#6366f1' : '#334155';
+      } catch(_) { _torchOn = !_torchOn; }
+    });
+
+    // ── Photo / file decode ──────────────────────────────────────────────────
+    async function decodeFile(file) {
+      // Path 1: BarcodeDetector via ImageBitmap (fast, native)
+      if ('BarcodeDetector' in window) {
+        try {
+          let formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','data_matrix','codabar','qr_code'];
+          try { const sup = await BarcodeDetector.getSupportedFormats(); formats = formats.filter(f => sup.includes(f)); } catch(_) {}
+          const detector = new BarcodeDetector({ formats });
+          const bitmap   = await createImageBitmap(file);
+          const results  = await detector.detect(bitmap);
+          bitmap.close();
+          if (results.length > 0) return results[0].rawValue;
+        } catch(_) {}
+      }
+      // Path 2: ZXing via canvas (works on all browsers including iOS Safari)
+      await ensureZXing();
+      const img    = new Image();
+      const blobUrl = URL.createObjectURL(file);
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = blobUrl; });
+      URL.revokeObjectURL(blobUrl);
+      const canvas  = document.createElement('canvas');
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      const reader  = new window.ZXing.BrowserMultiFormatReader();
+      const result  = await reader.decodeOnce(canvas); // throws NotFoundException if no barcode
+      return result.getText();
+    }
+
+    photoBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      setStatus('Decoding photo…');
+      try {
+        const code = await decodeFile(file);
+        submit(code);
+      } catch(e) {
+        setStatus('⚠ No barcode found — try a clearer, well-lit photo.', 'err');
+      }
+    });
+
+    manualBtn.addEventListener('click', () => { const v = manualInput.value.trim(); if (v) submit(v); });
+    manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = manualInput.value.trim(); if (v) submit(v); } });
+
+    scanAgainBtn.addEventListener('click', () => {
+      _submitted = false;
+      _torchOn   = false;
+      torchBtn.textContent       = '🔦 Flash';
+      torchBtn.style.color       = '#cbd5e1';
+      torchBtn.style.borderColor = '#334155';
+      successCard.style.display  = 'none';
+      scanCard.style.display     = 'flex';
+      startCamera();
+    });
+
     // ── Boot ─────────────────────────────────────────────────────────────────
-    if (token) startCamera();
+    if (!token) {
+      scanCard.style.display = 'none';
+      noToken.style.display  = 'flex';
+    } else {
+      startCamera();
+    }
   </script>
 </body>
 </html>
